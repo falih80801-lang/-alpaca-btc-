@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -11,14 +12,33 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 
-API_KEY = os.environ["ALPACA_API_KEY"]
-SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
+# =========================================================
+# CLEAN KEYS
+# =========================================================
+
+def read_key(name):
+    value = os.environ[name]
+
+    # إذا Railway أضاف Reference بالغلط نحذفه
+    value = value.replace("${{ALPACA_API_KEY}}", "")
+    value = value.replace("${{ALPACA_SECRET_KEY}}", "")
+
+    # حذف المسافات والأسطر والمحارف غير الإنجليزية
+    value = re.sub(r"[^A-Za-z0-9_-]", "", value)
+
+    return value
+
+
+API_KEY = read_key("ALPACA_API_KEY")
+SECRET_KEY = read_key("ALPACA_SECRET_KEY")
+
+
+# =========================================================
+# SETTINGS
+# =========================================================
 
 SYMBOL = "BTC/USD"
 TRADE_USD = 100.0
-
-# البوت يراجع السوق كل دقيقة،
-# لكن التحليل نفسه مبني على شموع 5 دقائق
 CHECK_EVERY_SECONDS = 60
 
 trading = TradingClient(
@@ -30,10 +50,37 @@ trading = TradingClient(
 data_client = CryptoHistoricalDataClient()
 
 
-def get_bars():
-    end = datetime.now(timezone.utc)
+# =========================================================
+# TEST ALPACA ACCOUNT FIRST
+# =========================================================
 
-    # نحتاج بيانات أكثر لأن EMA200 على فريم 5 دقائق
+print("BTC PAPER BOT STARTED")
+print("Paper trading only")
+print("Execution timeframe: 5 MINUTES")
+print("Stage 1 - Basic 5m strategy")
+
+try:
+    account = trading.get_account()
+
+    print(
+        "ALPACA CONNECTION: OK | "
+        f"Equity: ${float(account.equity):.2f}"
+    )
+
+except Exception as error:
+    print(
+        "ALPACA CONNECTION FAILED:",
+        error
+    )
+
+
+# =========================================================
+# MARKET DATA
+# =========================================================
+
+def get_bars():
+
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=3)
 
     request = CryptoBarsRequest(
@@ -60,6 +107,10 @@ def get_bars():
 
     return bars.tail(300).copy()
 
+
+# =========================================================
+# SIGNAL
+# =========================================================
 
 def calculate_signal(df):
 
@@ -157,14 +208,16 @@ def calculate_signal(df):
     return "WAIT", info
 
 
+# =========================================================
+# POSITION
+# =========================================================
+
 def btc_position_qty():
 
     try:
 
-        position = (
-            trading.get_open_position(
-                "BTCUSD"
-            )
+        position = trading.get_open_position(
+            "BTCUSD"
         )
 
         return float(
@@ -175,6 +228,10 @@ def btc_position_qty():
 
         return 0.0
 
+
+# =========================================================
+# BUY
+# =========================================================
 
 def buy_btc():
 
@@ -203,6 +260,10 @@ def buy_btc():
     )
 
 
+# =========================================================
+# EXIT
+# =========================================================
+
 def exit_btc():
 
     if btc_position_qty() <= 0:
@@ -222,22 +283,9 @@ def exit_btc():
     )
 
 
-print(
-    "BTC PAPER BOT STARTED"
-)
-
-print(
-    "Paper trading only"
-)
-
-print(
-    "Execution timeframe: 5 MINUTES"
-)
-
-print(
-    "Stage 1 - Basic 5m strategy"
-)
-
+# =========================================================
+# LOOP
+# =========================================================
 
 while True:
 
@@ -245,10 +293,8 @@ while True:
 
         bars = get_bars()
 
-        signal, info = (
-            calculate_signal(
-                bars
-            )
+        signal, info = calculate_signal(
+            bars
         )
 
         print(
@@ -259,7 +305,7 @@ while True:
             signal
         )
 
-        if info is not None:
+        if info:
 
             print(
                 f"5M | "
