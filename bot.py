@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -14,16 +15,33 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 
 
 # =========================================================
-# ACCOUNT
+# CLEAN ALPACA KEYS
 # =========================================================
 
-API_KEY = os.environ["ALPACA_API_KEY"]
-SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
+def read_key(name):
+    value = os.environ[name]
+
+    # Remove accidental Railway references
+    value = value.replace("${{ALPACA_API_KEY}}", "")
+    value = value.replace("${{ALPACA_SECRET_KEY}}", "")
+
+    # Keep only valid key characters
+    value = re.sub(r"[^A-Za-z0-9_-]", "", value)
+
+    return value
+
+
+API_KEY = read_key("ALPACA_API_KEY")
+SECRET_KEY = read_key("ALPACA_SECRET_KEY")
+
+
+# =========================================================
+# ACCOUNT
+# =========================================================
 
 SYMBOL = "BTC/USD"
 POSITION_SYMBOL = "BTCUSD"
 
-# مهم: تجريبي فقط
 trading = TradingClient(
     API_KEY,
     SECRET_KEY,
@@ -37,22 +55,15 @@ data_client = CryptoHistoricalDataClient()
 # BOT SETTINGS
 # =========================================================
 
-# حجم كل صفقة تجريبية
 TRADE_USD = 100.0
 
-# فحص كل دقيقة
 CHECK_EVERY_SECONDS = 60
 
-# حد أقصى للصفقات اليومية
 MAX_TRADES_PER_DAY = 6
 
-# هدف إيقاف يومي - ليس ضمان ربح
 DAILY_PROFIT_TARGET = 200.0
-
-# خسارة يومية قصوى
 DAILY_LOSS_LIMIT = -100.0
 
-# انتظار بعد الخروج قبل دخول جديد
 COOLDOWN_MINUTES = 10
 
 
@@ -72,7 +83,6 @@ MAX_RSI_BUY = 70
 
 MIN_VOLUME_RATIO = 1.05
 
-# وقف وهدف حسب ATR
 STOP_ATR_MULTIPLIER = 1.20
 TAKE_PROFIT_ATR_MULTIPLIER = 2.00
 
@@ -87,11 +97,10 @@ last_exit_time = None
 
 
 # =========================================================
-# GET DATA
+# DATA
 # =========================================================
 
 def get_bars(minutes, hours_back, tail_count=400):
-
     end = datetime.now(timezone.utc)
     start = end - timedelta(hours=hours_back)
 
@@ -105,27 +114,21 @@ def get_bars(minutes, hours_back, tail_count=400):
         end=end,
     )
 
-    bars = data_client.get_crypto_bars(
-        request
-    ).df
+    bars = data_client.get_crypto_bars(request).df
 
     if isinstance(bars.index, pd.MultiIndex):
         bars = bars.xs(SYMBOL)
 
     bars = bars.sort_index()
 
-    # مهم جداً:
-    # تجاهل الشمعة الحالية غير المغلقة
+    # use closed candles only
     if len(bars) > 1:
         bars = bars.iloc[:-1]
 
-    return bars.tail(
-        tail_count
-    ).copy()
+    return bars.tail(tail_count).copy()
 
 
 def get_hour_bars(days_back=20):
-
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=days_back)
 
@@ -136,16 +139,13 @@ def get_hour_bars(days_back=20):
         end=end,
     )
 
-    bars = data_client.get_crypto_bars(
-        request
-    ).df
+    bars = data_client.get_crypto_bars(request).df
 
     if isinstance(bars.index, pd.MultiIndex):
         bars = bars.xs(SYMBOL)
 
     bars = bars.sort_index()
 
-    # آخر شمعة مغلقة فقط
     if len(bars) > 1:
         bars = bars.iloc[:-1]
 
@@ -157,7 +157,6 @@ def get_hour_bars(days_back=20):
 # =========================================================
 
 def calculate_indicators(df):
-
     df = df.copy()
 
     close = df["close"]
@@ -165,7 +164,6 @@ def calculate_indicators(df):
     low = df["low"]
     volume = df["volume"]
 
-    # EMA
     df["ema9"] = close.ewm(
         span=9,
         adjust=False
@@ -186,7 +184,7 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    # RSI Wilder
+    # RSI
     delta = close.diff()
 
     gain = delta.clip(lower=0)
@@ -211,7 +209,7 @@ def calculate_indicators(df):
         100 / (1 + rs)
     )
 
-    # TRUE RANGE
+    # True Range
     previous_close = close.shift(1)
 
     tr1 = high - low
@@ -229,7 +227,7 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    # DIRECTIONAL MOVEMENT
+    # DI / ADX
     up_move = high.diff()
     down_move = -low.diff()
 
@@ -319,7 +317,7 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    # Relative Volume
+    # Relative volume
     df["volume_avg"] = volume.rolling(
         20
     ).mean()
@@ -341,7 +339,6 @@ def calculate_indicators(df):
 # =========================================================
 
 def calculate_wave(df):
-
     if len(df) < 50:
         return "WAIT"
 
@@ -420,11 +417,10 @@ def calculate_wave(df):
 
 
 # =========================================================
-# BUYER / SELLER STRENGTH
+# MARKET STRENGTH
 # =========================================================
 
 def calculate_strength(df):
-
     row = df.iloc[-1]
 
     price = float(row["close"])
@@ -447,43 +443,36 @@ def calculate_strength(df):
     buyer = 0
     seller = 0
 
-    # EMA200
     if price > ema200:
         buyer += 15
     else:
         seller += 15
 
-    # EMA50
     if price > ema50:
         buyer += 10
     else:
         seller += 10
 
-    # EMA9 / EMA21
     if ema9 > ema21:
         buyer += 15
     else:
         seller += 15
 
-    # EMA21 / EMA50
     if ema21 > ema50:
         buyer += 10
     else:
         seller += 10
 
-    # RSI
     if rsi >= 55:
         buyer += 15
     elif rsi <= 45:
         seller += 15
 
-    # DI
     if plus_di > minus_di:
         buyer += 15
     else:
         seller += 15
 
-    # ADX
     if adx >= 25:
         if plus_di > minus_di:
             buyer += 10
@@ -496,7 +485,6 @@ def calculate_strength(df):
         else:
             seller += 5
 
-    # Volume
     if volume_ratio >= 1.10:
         if plus_di > minus_di:
             buyer += 5
@@ -521,7 +509,6 @@ def calculate_strength(df):
 # =========================================================
 
 def analyse_timeframe(df):
-
     if len(df) < 210:
         raise ValueError(
             "Not enough closed candles"
@@ -603,11 +590,10 @@ def analyse_timeframe(df):
 
 
 # =========================================================
-# MARKET MAKER SIGNAL
+# SIGNAL
 # =========================================================
 
 def calculate_signal():
-
     bars5 = get_bars(
         minutes=5,
         hours_back=72,
@@ -636,10 +622,7 @@ def calculate_signal():
         bars1h
     )
 
-    # =====================================================
     # STRICT BUY
-    # =====================================================
-
     buy_5m = (
         tf5["wave"] == "BULL"
 
@@ -756,7 +739,6 @@ def calculate_signal():
         and
         buy_1h
     ):
-
         return (
             "BUY",
             tf5,
@@ -764,10 +746,7 @@ def calculate_signal():
             tf1h
         )
 
-    # =====================================================
     # STRICT SELL / EXIT
-    # =====================================================
-
     sell_5m = (
         tf5["wave"] == "BEAR"
 
@@ -816,7 +795,6 @@ def calculate_signal():
         and
         sell_15m
     ):
-
         return (
             "SELL",
             tf5,
@@ -837,20 +815,16 @@ def calculate_signal():
 # =========================================================
 
 def get_btc_position():
-
     try:
-
         return trading.get_open_position(
             POSITION_SYMBOL
         )
 
     except Exception:
-
         return None
 
 
 def btc_position_qty():
-
     position = get_btc_position()
 
     if position is None:
@@ -866,7 +840,6 @@ def btc_position_qty():
 # =========================================================
 
 def get_daily_pnl():
-
     account = trading.get_account()
 
     equity = float(
@@ -889,11 +862,9 @@ def get_daily_pnl():
 # =========================================================
 
 def buy_btc():
-
     global trades_today
 
     if btc_position_qty() > 0:
-
         print(
             "BUY BLOCKED | "
             "BTC position already open"
@@ -926,11 +897,9 @@ def buy_btc():
 # =========================================================
 
 def exit_btc(reason):
-
     global last_exit_time
 
     if btc_position_qty() <= 0:
-
         print(
             "EXIT BLOCKED | "
             "No BTC position"
@@ -959,7 +928,6 @@ def exit_btc(reason):
 # =========================================================
 
 def cooldown_active():
-
     if last_exit_time is None:
         return False
 
@@ -985,7 +953,6 @@ def cooldown_active():
 # =========================================================
 
 def manage_open_position(tf5):
-
     position = get_btc_position()
 
     if position is None:
@@ -1028,7 +995,6 @@ def manage_open_position(tf5):
     )
 
     if current <= stop_price:
-
         exit_btc(
             "ATR STOP LOSS"
         )
@@ -1036,7 +1002,6 @@ def manage_open_position(tf5):
         return True
 
     if current >= target_price:
-
         exit_btc(
             "ATR TAKE PROFIT"
         )
@@ -1051,7 +1016,6 @@ def manage_open_position(tf5):
 # =========================================================
 
 def reset_daily_counter():
-
     global current_day
     global trades_today
 
@@ -1062,7 +1026,6 @@ def reset_daily_counter():
     )
 
     if now_day != current_day:
-
         current_day = now_day
         trades_today = 0
 
@@ -1077,7 +1040,6 @@ def reset_daily_counter():
 # =========================================================
 
 def test_connection():
-
     account = trading.get_account()
 
     print(
@@ -1136,11 +1098,9 @@ print(
 
 
 try:
-
     test_connection()
 
 except Exception as error:
-
     print(
         "ALPACA CONNECTION FAILED:",
         error
@@ -1169,10 +1129,7 @@ while True:
             f"${daily_pnl:.2f}"
         )
 
-        # ================================================
         # DAILY PROFIT TARGET
-        # ================================================
-
         if (
             daily_pnl
             >=
@@ -1180,7 +1137,6 @@ while True:
         ):
 
             if btc_position_qty() > 0:
-
                 exit_btc(
                     "DAILY PROFIT TARGET"
                 )
@@ -1196,10 +1152,7 @@ while True:
 
             continue
 
-        # ================================================
         # DAILY LOSS LIMIT
-        # ================================================
-
         if (
             daily_pnl
             <=
@@ -1207,7 +1160,6 @@ while True:
         ):
 
             if btc_position_qty() > 0:
-
                 exit_btc(
                     "DAILY LOSS LIMIT"
                 )
@@ -1223,10 +1175,7 @@ while True:
 
             continue
 
-        # ================================================
         # ANALYSIS
-        # ================================================
-
         signal, tf5, tf15, tf1h = (
             calculate_signal()
         )
@@ -1270,10 +1219,7 @@ while True:
             f"ADX:{tf1h['adx']:.1f}"
         )
 
-        # ================================================
         # MANAGE POSITION
-        # ================================================
-
         position_closed = (
             manage_open_position(
                 tf5
@@ -1281,17 +1227,13 @@ while True:
         )
 
         if position_closed:
-
             time.sleep(
                 CHECK_EVERY_SECONDS
             )
 
             continue
 
-        # ================================================
         # BUY
-        # ================================================
-
         if signal == "BUY":
 
             if (
@@ -1313,34 +1255,24 @@ while True:
                 )
 
             else:
-
                 buy_btc()
 
-        # ================================================
         # SELL = EXIT LONG
-        # ================================================
-
         elif signal == "SELL":
 
             if btc_position_qty() > 0:
-
                 exit_btc(
                     "STRICT MARKET MAKER SELL"
                 )
 
             else:
-
                 print(
                     "SELL SIGNAL | "
                     "No BTC long position"
                 )
 
-        # ================================================
         # WAIT
-        # ================================================
-
         else:
-
             print(
                 "WAIT | "
                 "Strict conditions not complete"
